@@ -38,7 +38,7 @@ sub usage();
 my %opt;
 $Getopt::Std::STANDARD_HELP_VERSION = 1;
 
-getopts('hvo:',\%opt);
+getopts('hvod:',\%opt);
 
 usage() if $opt{'h'};
 
@@ -94,7 +94,7 @@ sub HELP_MESSAGE() {
 sub usage() {
 print STDERR <<EOF;
 usage: 
-    $0 [-h] [-o <OUTPUT_FILE>] LOGFILE [SYMBOL_PATH ...]
+    $0 [-h] [-d <DSYM_FOLDER_PATH>] [-o <OUTPUT_FILE>] LOGFILE [SYMBOL_PATH ...]
     
     Symbolicates a crashdump LOGFILE which may be "-" to refer to stdin. By default,
     all heuristics will be employed in an attempt to symbolicate all addresses. 
@@ -102,6 +102,7 @@ usage:
     
 Options:
     
+    -d  If specified, we won't do the SpotlightSearch and just read the dSYM file from DSYM_FOLDER_PATH (Added by James)
     -o  If specified, the symbolicated log will be written to OUTPUT_FILE (defaults to stdout)
     -h  Display this message
     -v  Verbose
@@ -122,11 +123,12 @@ sub getSymbolDirPaths {
     
     my @result = grep { -e && -d } bsd_glob('{/System,,~}/Library/Developer/Xcode/iOS DeviceSupport/'.$versionPattern.'/Symbols*', GLOB_BRACE | GLOB_TILDE);
     
-	print STDERR "result @result\n";
+	print STDERR "result @result\n" if $opt{v};
 
     foreach my $foundPath (`mdfind "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode' || kMDItemCFBundleIdentifier == 'com.apple.Xcode'"`) {
         chomp $foundPath;
         my @pathResults = grep { -e && -d && !/Simulator/ }  bsd_glob($foundPath.'/Contents/Developer/Platforms/*.platform/DeviceSupport/'.$versionPattern.'/Symbols*/');
+		print STDERR "pathResults -- @pathResults\n" if $opt{v};
         push(@result, @pathResults);
     }
 
@@ -140,11 +142,12 @@ sub getSymbolPathFor_searchpaths {
     for my $item (@extra_search_paths)
     {
         my $glob = "$item"."{$bin,*/$bin,$path}*";
+		print STDERR "glob $glob \n" if $opt{v};
         #print STDERR "\nSearching pattern: [$glob]..." if $opt{v};
         push(@result, grep { -e && (! -d) } bsd_glob ($glob, GLOB_BRACE));
     }
     
-    print STDERR "\nSearching [@result]..." if $opt{v};
+    print STDERR "\nSearching [@result]...\n" if $opt{v};
     return @result;
 }
 
@@ -167,15 +170,23 @@ sub getSymbolPathFor_dsymUuid{
     my $myuuid = uc($uuid);    # uuid's in Spotlight database are all uppercase
     $myuuid =~ /(.{8})(.{4})(.{4})(.{4})(.{12})/;
     $myuuid = "$1-$2-$3-$4-$5";
-    
-    # Do the search in Spotlight.
+
+	my @dsym_dirs = ();
     my $cmd = "mdfind \"com_apple_xcode_dsym_uuids == $myuuid\"";
-    print STDERR "Running $cmd\n" if $opt{v};
+	if ($opt{d}) {
+		push(@dsym_dirs, $opt{d});
+	} else {
+    	# Do the search in Spotlight.
+    	print STDERR "Running $cmd\n" if $opt{v};
+		push(@dsym_dirs, split(/\n/, `$cmd`));
+	}	
+
+    print STDERR "dsymdirs @dsym_dirs\n" if $opt{v};
     
     my @dsym_paths    = ();
     my @archive_paths = ();
     
-    foreach my $dsymdir (split(/\n/, `$cmd`)) {
+    foreach my $dsymdir (@dsym_dirs) {
         $cmd = "mdls -name com_apple_xcode_dsym_paths ".quotemeta($dsymdir);
         print STDERR "Running $cmd\n" if $opt{v};
         
@@ -195,77 +206,78 @@ sub getSymbolPathFor_dsymUuid{
     }
     
     @dsym_paths = uniq(@dsym_paths);
-    
-    my @exec_names  = map(basename($_), @dsym_paths);
-    @exec_names = uniq(@exec_names);
-    
-    print STDERR "\@dsym_paths = ( @dsym_paths )\n" if $opt{v};
-    print STDERR "\@exec_names = ( @exec_names )\n" if $opt{v};
-    
-    my @app_bundles_next_to_dsyms;
-    foreach my $dsymdir (@dsym_paths) {
-        my ($dsympath) = $dsymdir =~ /(^.*)\.dSYM/i;
-        push(@app_bundles_next_to_dsyms, $dsympath . '.app');
-    }
-    
-    my @exec_paths  = ();
-    foreach my $exec_name (@exec_names) {
-        #We need to find all of the apps with the given name (both in- and outside of any archive)
-        #First, use spotlight to find un-archived apps:
-        my $cmd = "mdfind \"kMDItemContentType == com.apple.application-bundle && (kMDItemAlternateNames == '$exec_name.app' || kMDItemDisplayName == '$exec_name' || kMDItemDisplayName == '$exec_name.app')\"";
-        print STDERR "Running $cmd\n" if $opt{v};
-        
-        my @app_bundles = (@app_bundles_next_to_dsyms, split(/\n/, `$cmd`));
-        foreach my $app_bundle (@app_bundles) {
-            if( -f "$app_bundle/$exec_name") {
-                push(@exec_paths, "$app_bundle/$exec_name");
-            }
-        }
-        
-        #Find any naked executables
-        $cmd = "mdfind \"kMDItemContentType == public.unix-executable && kMDItemDisplayName == '$exec_name'\"";
-        print STDERR "Running $cmd\n" if $opt{v};
-        
-        foreach my $exec_file (split(/\n/, `$cmd`)) {
-            if( -f "$exec_file") {
-                push(@exec_paths, "$exec_file");
-            }
-        }
-        
-        #Next, try to find paths within any archives
-        foreach my $archive_path (@archive_paths) {
-            my $cmd = "find \"$archive_path/Products\" -name \"$exec_name.app\"";
-            print STDERR "Running $cmd\n" if $opt{v};
-            
-            foreach my $app_bundle (split(/\n/, `$cmd`)) {
-                if( -f "$app_bundle/$exec_name") {
-                    push(@exec_paths, "$app_bundle/$exec_name");
-                }
-            }
-        }
-    }
-    
-    if ( @exec_paths >= 1 ) {
-        foreach my $exec (@exec_paths) {
-            if ( !matchesUUID($exec, $uuid, $arch) ) {
-                print STDERR "UUID of executable is: $uuid\n" if $opt{v};
-                print STDERR "Executable name: $exec\n\n" if $opt{v};
-                print STDERR "UUID doesn't match dsym for executable $exec\n" if $opt{v};
-            } else {
-                print STDERR "Found executable $exec\n" if $opt{v};
-                return $exec;
-            }
-        }
-    }
-    
 
 	# Added by James for symbolication without the app binary
-	print STDERR "dsym paths @dsym_paths \n";
-	if (scalar @dsym_paths > 0 && !@dsym_paths[0] eq '') {
-		$global_app_dsym_path = @dsym_paths[0];	
+	print STDERR "dsym paths @dsym_paths \n" if $opt{v};
+	if ((scalar @dsym_paths) > 0 && !($dsym_paths[0] eq '')) {
+		$global_app_dsym_path = $dsym_paths[0];	
+		return $dsym_paths[0];
 	}
-	return @dsym_paths;
+    
+	# Commented by James,  we don't want to lookup the app binary, the dSYM already has enough information 
 
+    #my @exec_names  = map(basename($_), @dsym_paths);
+    #@exec_names = uniq(@exec_names);
+    #
+    #print STDERR "\@dsym_paths = ( @dsym_paths )\n" if $opt{v};
+    #print STDERR "\@exec_names = ( @exec_names )\n" if $opt{v};
+    #
+    #my @app_bundles_next_to_dsyms;
+    #foreach my $dsymdir (@dsym_paths) {
+    #    my ($dsympath) = $dsymdir =~ /(^.*)\.dSYM/i;
+    #    push(@app_bundles_next_to_dsyms, $dsympath . '.app');
+    #}
+    #
+    #my @exec_paths  = ();
+    #foreach my $exec_name (@exec_names) {
+    #    #We need to find all of the apps with the given name (both in- and outside of any archive)
+    #    #First, use spotlight to find un-archived apps:
+    #    my $cmd = "mdfind \"kMDItemContentType == com.apple.application-bundle && (kMDItemAlternateNames == '$exec_name.app' || kMDItemDisplayName == '$exec_name' || kMDItemDisplayName == '$exec_name.app')\"";
+    #    print STDERR "Running $cmd\n" if $opt{v};
+    #    
+    #    my @app_bundles = (@app_bundles_next_to_dsyms, split(/\n/, `$cmd`));
+    #    foreach my $app_bundle (@app_bundles) {
+    #        if( -f "$app_bundle/$exec_name") {
+    #            push(@exec_paths, "$app_bundle/$exec_name");
+    #        }
+    #    }
+    #    
+    #    #Find any naked executables
+    #    $cmd = "mdfind \"kMDItemContentType == public.unix-executable && kMDItemDisplayName == '$exec_name'\"";
+    #    print STDERR "Running $cmd\n" if $opt{v};
+    #    
+    #    foreach my $exec_file (split(/\n/, `$cmd`)) {
+    #        if( -f "$exec_file") {
+    #            push(@exec_paths, "$exec_file");
+    #        }
+    #    }
+    #    
+    #    #Next, try to find paths within any archives
+    #    foreach my $archive_path (@archive_paths) {
+    #        my $cmd = "find \"$archive_path/Products\" -name \"$exec_name.app\"";
+    #        print STDERR "Running $cmd\n" if $opt{v};
+    #        
+    #        foreach my $app_bundle (split(/\n/, `$cmd`)) {
+    #            if( -f "$app_bundle/$exec_name") {
+    #                push(@exec_paths, "$app_bundle/$exec_name");
+    #            }
+    #        }
+    #    }
+    #}
+    #
+    #if ( @exec_paths >= 1 ) {
+    #    foreach my $exec (@exec_paths) {
+    #        if ( !matchesUUID($exec, $uuid, $arch) ) {
+    #            print STDERR "UUID of executable is: $uuid\n" if $opt{v};
+    #            print STDERR "Executable name: $exec\n\n" if $opt{v};
+    #            print STDERR "UUID doesn't match dsym for executable $exec\n" if $opt{v};
+    #        } else {
+    #            print STDERR "Found executable $exec\n" if $opt{v};
+    #            return $exec;
+    #        }
+    #    }
+    #}
+    
     print STDERR "Did not find executable for dsym\n" if $opt{v};
     return undef;
 }
@@ -348,8 +360,8 @@ sub getSymbolPathFor {
     $out_path = getSymbolPathFor_uuid($uuid, $uuidsPath);
     undef $out_path if ( defined($out_path) && !length($out_path) );
     
-    print STDERR "--[$out_path] "  if defined($out_path) and $opt{v};
-    print STDERR "--[undef] " if !defined($out_path) and $opt{v};
+    print STDERR "--[$out_path] \n"  if defined($out_path) and $opt{v};
+    print STDERR "--[undef] \n" if !defined($out_path) and $opt{v};
     
     if ( !defined($out_path) || !matchesUUID($out_path, $uuid, $arch)) {
         undef $out_path;
@@ -361,8 +373,8 @@ sub getSymbolPathFor {
                 if(@out_path_arr) {
                     foreach my $temp_path (@out_path_arr) {
                         
-                        print STDERR "--[$temp_path] "  if defined($temp_path) and $opt{v};
-                        print STDERR "--[undef] " if !defined($temp_path) and $opt{v};
+                        print STDERR "--[$temp_path] \n"  if defined($temp_path) and $opt{v};
+                        print STDERR "--[undef] \n" if !defined($temp_path) and $opt{v};
                         
                         if ( defined($temp_path) && matchesUUID($temp_path, $uuid, $arch) ) {
                             $out_path = $temp_path;
@@ -387,6 +399,7 @@ sub getSymbolPathFor {
     }
     
     if (defined($out_path)) {
+		print STDERR "Found symbol path $out_path for dsym uuid $uuid and arch $arch\n" if $opt{v};
         print STDERR "-- MATCH\n"  if $opt{v};
         return $out_path;
     }
@@ -635,7 +648,7 @@ sub parse_backtrace {
     my %frames = ();
     for my $line (@lines) {
 
-		print STDERR "backtrace line decrement $decrement -- $line \n";
+		print STDERR "backtrace line decrement $decrement -- $line \n" if $opt{v};
 
         if( $line =~ m{
             ^\d+ \s+     # stack frame number
@@ -660,7 +673,7 @@ sub parse_backtrace {
                 $address = sprintf("0x%X", (hex($address) & ~1) - 1);
 				my $processed_address = sprintf('0x%X', hex($raw_address) & ~1);
 				my $processed_address2 = sprintf('0x%X', hex($raw_address));
-				print STDERR "-- $bundle raw_address $raw_address address $address processed_address $processed_address processed_address2 $processed_address2 \n";
+				print STDERR "-- $bundle raw_address $raw_address address $address processed_address $processed_address processed_address2 $processed_address2 \n" if $opt{v};
             }
             
             $frames{$replace} = {
@@ -804,10 +817,10 @@ sub fetch_symbolled_binaries {
         
         print STDERR "\r${pre}fetching symbol file for $b$post" if $opt{v};
         $pre .= ".";
+        print STDERR "\rfetching symbol file for >>> $b$post\n" if $opt{v};
         
         
         my $symbol = $$lib{symbol};
-		print STDERR "\r 1====================================================== \n";
         unless($symbol) {
             ($symbol) = getSymbolPathFor($$lib{path},$build,$$lib{uuid},$$lib{arch},@extra_search_paths);
             if($symbol) { 
@@ -819,7 +832,6 @@ sub fetch_symbolled_binaries {
             }
         }
         
-		print STDERR "\r 2====================================================== \n";
         print STDERR "\r${pre}checking address range for $b$post" if $opt{v};
         $pre .= ".";
         
@@ -871,6 +883,7 @@ sub symbolize_frames {
     for my $k (keys %$bt) {
         my $frame = $$bt{$k};
         my $lib = $$images{$$frame{bundle}};
+		print STDERR "lib{symbol} $$lib{symbol} \n" if $opt{v};
         unless($lib) {
             # don't know about it, can't symbol
             # should have already been warned about this!
@@ -880,7 +893,7 @@ sub symbolize_frames {
         }
         
 		while (my($key,$value) = each($frame)) {
-			print STDERR "key $key value $value \n";
+			#print STDERR "key $key value $value \n" if $opt{v};
 		}
 		
 
@@ -896,17 +909,11 @@ sub symbolize_frames {
     # run atos for each library
     while(my($symbol,$frames) = each(%frames_to_lookup)) {
 
-		print STDERR "symbol $symbol\n";
+		print STDERR "symbol $symbol\n" if $opt{v};
 
         # escape the symbol path if it contains single quotes
         my $escapedSymbol = $symbol;
         $escapedSymbol =~ s/\'/\'\\'\'/g;
-		
-		# Added by James for symbolication without the app binary
-		if ($escapedSymbol eq '1') {
-			print STDERR "Replaced unresolved executable to $global_app_dsym_path\n";
-			$escapedSymbol = $global_app_dsym_path;
-		}
 
         # run atos with the addresses and binary files we just gathered
         my $arch = $arch_map{$symbol};
@@ -995,6 +1002,8 @@ sub symbolicate_log {
     my ($file,@extra_search_paths) = @_;
     
     print STDERR "Symbolicating...\n" if ( $opt{v} );
+	my $dsym_param =$opt{'d'};
+    print STDERR "provided dsym $dsym_param \n" if ( $opt{v} );
     
     my $log_ref = slurp_file($file);
     
@@ -1052,7 +1061,9 @@ sub symbolicate_log {
         print STDERR "\n";
     } 
     
+	print STDERR "extra_search_paths before searching @extra_search_paths\n" if $opt{v};
     @extra_search_paths = (@extra_search_paths, getSymbolDirPaths($version, $build));
+	print STDERR "extra_search_paths after searching @extra_search_paths\n" if $opt{v};
 
     fetch_symbolled_binaries($images,$build,$first_bundle,@extra_search_paths);
     
