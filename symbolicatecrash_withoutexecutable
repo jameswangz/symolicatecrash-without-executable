@@ -10,6 +10,10 @@
 # Copyright (c) 2008-2011 Apple Inc. All Rights Reserved.
 #
 #
+# Modified by James, 2 changes were made
+#  1) The executable app binary is no longer needed,  the dSYM file has enough information to do the symbolication
+#  2) A '-d' option is added to allow the user to provided the dSYM file path to avoid the Spotlight Search
+# 
 
 use strict;
 use warnings;
@@ -38,7 +42,7 @@ sub usage();
 my %opt;
 $Getopt::Std::STANDARD_HELP_VERSION = 1;
 
-getopts('hvod:',\%opt);
+getopts('hvo:d:',\%opt);
 
 usage() if $opt{'h'};
 
@@ -174,6 +178,7 @@ sub getSymbolPathFor_dsymUuid{
 	my @dsym_dirs = ();
     my $cmd = "mdfind \"com_apple_xcode_dsym_uuids == $myuuid\"";
 	if ($opt{d}) {
+    	print STDERR "Using user provided dSYM $opt{d} \n" if $opt{v};
 		push(@dsym_dirs, $opt{d});
 	} else {
     	# Do the search in Spotlight.
@@ -1002,9 +1007,12 @@ sub symbolicate_log {
     my ($file,@extra_search_paths) = @_;
     
     print STDERR "Symbolicating...\n" if ( $opt{v} );
-	my $dsym_param =$opt{'d'};
-    print STDERR "provided dsym $dsym_param \n" if ( $opt{v} );
-    
+	my $dsym_param = ""; 
+	my $output_param = ""; 
+	$dsym_param = $opt{d} if $opt{d};
+	$output_param = $opt{o} if $opt{o};
+    print STDERR "provided dsym $dsym_param output file $output_param \n" if ( $opt{v} );
+
     my $log_ref = slurp_file($file);
     
     print STDERR length($$log_ref)." characters read.\n" if ( $opt{v} );
