@@ -83,6 +83,7 @@ print STDERR "size path is '$size'\n" if $opt{v};
 #############################
 # run the script
 
+my $global_dsym_uuids = '';
 symbolicate_log(@ARGV);
 
 exit 0;
@@ -164,7 +165,6 @@ sub getSymbolPathFor_uuid{
 
 # Look up a dsym file by UUID in Spotlight, then find the executable from the dsym.
 # Added by James for symbolication without the app binary
-our $global_app_dsym_path = '';	
 sub getSymbolPathFor_dsymUuid{
     my ($uuid,$arch) = @_;
     $uuid or return undef;
@@ -179,7 +179,15 @@ sub getSymbolPathFor_dsymUuid{
     my $cmd = "mdfind \"com_apple_xcode_dsym_uuids == $myuuid\"";
 	if ($opt{d}) {
     	print STDERR "Using user provided dSYM $opt{d} \n" if $opt{v};
-		push(@dsym_dirs, $opt{d});
+		if($global_dsym_uuids eq '') {
+			$cmd = "mdls -name com_apple_xcode_dsym_uuids $opt{d}";	
+        	print STDERR "Running $cmd\n" if $opt{v};
+			$global_dsym_uuids = `$cmd`;
+        	print STDERR "set global dysm uuids : $global_dsym_uuids\n" if $opt{v};
+		}	
+		if (index($global_dsym_uuids, $myuuid) != -1) {
+			push(@dsym_dirs, $opt{d});
+		}	
 	} else {
     	# Do the search in Spotlight.
     	print STDERR "Running $cmd\n" if $opt{v};
@@ -215,7 +223,6 @@ sub getSymbolPathFor_dsymUuid{
 	# Added by James for symbolication without the app binary
 	print STDERR "dsym paths @dsym_paths \n" if $opt{v};
 	if ((scalar @dsym_paths) > 0 && !($dsym_paths[0] eq '')) {
-		$global_app_dsym_path = $dsym_paths[0];	
 		return $dsym_paths[0];
 	}
     
@@ -888,8 +895,7 @@ sub symbolize_frames {
     for my $k (keys %$bt) {
         my $frame = $$bt{$k};
         my $lib = $$images{$$frame{bundle}};
-		print STDERR "lib{symbol} $$lib{symbol} \n" if $opt{v};
-        unless($lib) {
+        unless($lib && $$lib{symbol}) {
             # don't know about it, can't symbol
             # should have already been warned about this!
             # print "Skipping unknown $$frame{bundle}\n";
@@ -897,6 +903,8 @@ sub symbolize_frames {
             next;
         }
         
+		print STDERR "lib{symbol} $$lib{symbol} \n" if $opt{v};
+
 		while (my($key,$value) = each($frame)) {
 			#print STDERR "key $key value $value \n" if $opt{v};
 		}
